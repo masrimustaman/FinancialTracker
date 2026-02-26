@@ -1,0 +1,68 @@
+import sqlite3
+import os
+from datetime import datetime
+import pandas as pd
+
+# Use environment variable for DB path or default to data/ledger.db
+DB_FILE = os.getenv("DATABASE_URL", "data/ledger.db")
+
+def init_db():
+    """Initializes the SQLite database with the transactions table."""
+    # Ensure the directory exists
+    db_dir = os.path.dirname(DB_FILE)
+    if db_dir and not os.path.exists(db_dir):
+        os.makedirs(db_dir)
+        
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS transactions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            date TEXT NOT NULL,
+            payee TEXT NOT NULL,
+            amount REAL NOT NULL,
+            category TEXT NOT NULL,
+            account TEXT NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+def save_transaction(date, payee, amount, category, account):
+    """Saves a single transaction to the database."""
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO transactions (date, payee, amount, category, account)
+        VALUES (?, ?, ?, ?, ?)
+    """, (date, payee, amount, category, account))
+    conn.commit()
+    conn.close()
+    return True
+
+def get_recent_transactions(limit=5):
+    """Retrieves the most recent transactions."""
+    conn = sqlite3.connect(DB_FILE)
+    df = pd.read_sql_query(f"SELECT * FROM transactions ORDER BY date DESC, created_at DESC LIMIT {limit}", conn)
+    conn.close()
+    return df
+
+def get_monthly_report(year, month):
+    """Retrieves all transactions for a given year and month."""
+    conn = sqlite3.connect(DB_FILE)
+    # Format month to be two digits
+    month_str = f"{int(month):02d}"
+    query = "SELECT * FROM transactions WHERE date LIKE ? ORDER BY date ASC"
+    df = pd.read_sql_query(query, conn, params=(f"{year}-{month_str}-%",))
+    conn.close()
+    return df
+
+def get_available_months():
+    """Returns a list of unique year-month strings available in the data."""
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT DISTINCT strftime('%Y-%m', date) as ym FROM transactions ORDER BY ym DESC")
+    months = [row[0] for row in cursor.fetchall() if row[0]]
+    conn.close()
+    return months
