@@ -60,33 +60,43 @@ docker build -t receipt-tracker .
 
 ### 2. Run the Container
 
-To run the container, you need to provide your Gemini API key. We recommend using an environment variable for security.
+The application requires a **Google Gemini API Key**. For security, the `.streamlit/secrets.toml` file is ignored by Docker during the build process. You must provide the key at runtime using one of the following methods:
 
-#### Basic Run (Temporary Data)
-```bash
-docker run -p 8501:8501 -e GEMINI_API_KEY='your_api_key_here' receipt-tracker
-```
-
-#### Recommended: Persistent Storage & Security
-To ensure your transactions are saved even if the container is restarted or removed, mount the `data/` directory as a volume.
+#### Option 1: Environment Variable (Recommended)
+This is the most secure and standard way to provide secrets to a container.
 
 ```bash
-docker run -d -p 8501:8501 \
+docker run -d \
   --name receipt-tracker \
-  -e GEMINI_API_KEY='your_api_key_here' \
+  -p 8501:8501 \
+  -e GEMINI_API_KEY='your_actual_api_key_here' \
+  -e GEMINI_MODEL_NAME='gemini-2.5-flash' \
   -v $(pwd)/data:/app/data \
-  receipt-tracker
+  expense-tracker
 ```
 
-### 🔐 Handling Secrets "Accordingly"
+*Note: `GEMINI_MODEL_NAME` defaults to `gemini-2.5-flash` if not specified. This allows you to easily switch to newer versions (e.g., `gemini-3.0-flash`) as they become available without rebuilding the image.*
 
-- **Environment Variable (Best Practice)**: Pass `-e GEMINI_API_KEY=your_key` when running the container. This keeps the secret out of the image layers and filesystems.
-- **Secrets File**: The Docker image is configured to ignore `.streamlit/secrets.toml`. If you prefer using the file, you can mount it at runtime:
-  ```bash
-  docker run -p 8501:8501 \
-    -v $(pwd)/.streamlit/secrets.toml:/app/.streamlit/secrets.toml \
-    receipt-tracker
-  ```
+#### Option 2: Mounting the Secrets File
+If you already have a `.streamlit/secrets.toml` file on your host machine, you can mount it into the container.
+
+1. Create the file if it doesn't exist:
+   ```toml
+   # .streamlit/secrets.toml
+   GEMINI_API_KEY = "your_actual_api_key_here"
+   ```
+2. Run with a volume mount:
+   ```bash
+   docker run -d \
+     --name receipt-tracker \
+     -p 8501:8501 \
+     -v $(pwd)/.streamlit/secrets.toml:/app/.streamlit/secrets.toml \
+     -v $(pwd)/data:/app/data \
+     expense-tracker
+   ```
+
+### 💾 Data Persistence
+To ensure your transaction history is saved when the container is stopped or updated, **always** include the volume mapping for the `data/` directory: `-v $(pwd)/data:/app/data`.
 
 ## 📂 Project Structure
 

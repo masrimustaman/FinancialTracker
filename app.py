@@ -6,7 +6,7 @@ from datetime import datetime
 from PIL import Image
 import io
 import pandas as pd
-from db import init_db, save_transaction, get_recent_transactions, get_monthly_report, get_available_months
+from db import init_db, save_transaction, get_recent_transactions, get_monthly_report, get_available_months, get_unique_categories, get_unique_accounts
 import streamlit.components.v1 as components
 
 # --- Configuration ---
@@ -18,11 +18,11 @@ components.html(
     <script>
     const manifest = document.createElement('link');
     manifest.rel = 'manifest';
-    manifest.href = '/app/static/manifest.json';
+    manifest.href = '/static/manifest.json';
     document.head.appendChild(manifest);
 
     if ('serviceWorker' in navigator) {
-      navigator.serviceWorker.register('/app/static/sw.js');
+      navigator.serviceWorker.register('/static/sw.js');
     }
     </script>
     """,
@@ -47,29 +47,56 @@ if not API_KEY:
 
 if API_KEY:
     genai.configure(api_key=API_KEY)
-    # Using 'gemini-1.5-flash' which is the standard model name for this package
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    
+    # Allow model selection via environment variable, defaulting to gemini-2.5-flash
+    model_name = os.environ.get("GEMINI_MODEL_NAME", "gemini-2.5-flash")
+    
+    # Using the specified model name
+    try:
+        model = genai.GenerativeModel(model_name)
+    except Exception as e:
+        st.error(f"Failed to initialize model '{model_name}': {e}")
+        # Fallback to a safe default if the provided one fails
+        model = genai.GenerativeModel("gemini-2.0-flash")
 else:
     st.error("Please provide a Gemini API Key to use the AI features.")
 
 # --- Helper Functions ---
 def parse_receipt_with_ai(image_bytes):
     """Sends image to Gemini and returns structured JSON."""
-    prompt = """
+    if not API_KEY:
+        st.error("Please provide a Gemini API Key in the sidebar.")
+        return None
+
+    # Ensure model is initialized (it should be if API_KEY is present, but good to check)
+    if 'model' not in globals():
+        st.error("AI Model not initialized. Please check your API key.")
+        return None
+
+    # Fetch existing categories and accounts for context
+    existing_categories = get_unique_categories()
+    existing_accounts = get_unique_accounts()
+    
+    category_context = f"Suggested categories: {', '.join(existing_categories)}" if existing_categories else "Common categories: Food, Utilities, Transport, Shopping, Health, Entertainment"
+    account_context = f"Known accounts: {', '.join(existing_accounts)}" if existing_accounts else "Common accounts: Cash, Credit Card, Checking, Debit Card"
+
+    prompt = f"""
     Act as an OCR and accounting assistant. Analyze this receipt and extract:
     - Date (formatted exactly as YYYY-MM-DD)
     - Payee name
     - Total Amount (as a float)
-    - A suitable expense category (e.g., 'Food', 'Utilities', 'Transport', 'Shopping')
+    - A suitable expense category. {category_context}
+    - The payment account or method used. {account_context}. 
+      If a specific card brand or last 4 digits are mentioned, suggest 'Credit Card' or 'Debit Card' accordingly.
 
-    Return the data STRICTLY as a JSON object with keys: "date", "payee", "amount", "category".
+    Return the data STRICTLY as a JSON object with keys: "date", "payee", "amount", "category", "account".
     Do not include any other text or markdown formatting.
     """
     
-    img = Image.open(io.BytesIO(image_bytes))
-    response = model.generate_content([prompt, img])
-    
     try:
+        img = Image.open(io.BytesIO(image_bytes))
+        response = model.generate_content([prompt, img])
+        
         text = response.text
         start_idx = text.find('{')
         end_idx = text.rfind('}')
@@ -78,7 +105,15 @@ def parse_receipt_with_ai(image_bytes):
             return json.loads(clean_json)
         return None
     except Exception as e:
-        st.error(f"Failed to parse AI response: {e}")
+        if "404" in str(e) or "not found" in str(e).lower():
+            st.error(f"The selected model was not found: {e}")
+            try:
+                available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+                st.info(f"Available models for your API key: {available_models}")
+            except Exception as list_err:
+                st.warning(f"Could not list available models: {list_err}")
+        else:
+            st.error(f"Failed to parse AI response: {e}")
         return None
 
 # --- Main App Logic ---

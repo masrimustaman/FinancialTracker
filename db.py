@@ -66,3 +66,21 @@ def get_available_months():
     months = [row[0] for row in cursor.fetchall() if row[0]]
     conn.close()
     return months
+
+def get_unique_categories():
+    """Returns a list of unique categories used in the database."""
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT DISTINCT category FROM transactions ORDER BY category ASC")
+    categories = [row[0] for row in cursor.fetchall() if row[0]]
+    conn.close()
+    return categories
+
+def get_unique_accounts():
+    """Returns a list of unique accounts used in the database."""
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT DISTINCT account FROM transactions ORDER BY account ASC")
+    accounts = [row[0] for row in cursor.fetchall() if row[0]]
+    conn.close()
+    return accounts
