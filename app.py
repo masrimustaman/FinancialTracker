@@ -6,11 +6,17 @@ from datetime import datetime
 from PIL import Image
 import io
 import pandas as pd
-from db import init_db, save_transaction, get_recent_transactions, get_monthly_report, get_available_months, get_unique_categories, get_unique_accounts
+from db import init_db, save_transaction, get_recent_transactions, get_monthly_report, get_available_months, get_unique_categories, get_unique_accounts, run_query
 import streamlit.components.v1 as components
+import re
 
 # --- Configuration ---
 st.set_page_config(page_title="Expense Tracker", page_icon="🧾", layout="wide")
+
+# Directory for storing receipt files
+RECEIPTS_DIR = "data/receipts"
+if not os.path.exists(RECEIPTS_DIR):
+    os.makedirs(RECEIPTS_DIR)
 
 # PWA Injection: This adds the manifest and service worker registration to the app
 components.html(
@@ -33,17 +39,15 @@ components.html(
 init_db()
 
 # Setup Gemini API
-# Standard practice: check environment variables first, then streamlit secrets
-API_KEY = os.environ.get("GEMINI_API_KEY")
-if not API_KEY:
+st.sidebar.subheader("🔑 API Configuration")
+env_api_key = os.environ.get("GEMINI_API_KEY")
+if not env_api_key:
     try:
-        API_KEY = st.secrets["GEMINI_API_KEY"]
+        env_api_key = st.secrets["GEMINI_API_KEY"]
     except Exception:
-        API_KEY = None
+        env_api_key = ""
 
-if not API_KEY:
-    st.sidebar.warning("GEMINI_API_KEY not found in .streamlit/secrets.toml or environment variables. Please enter it below:")
-    API_KEY = st.sidebar.text_input("Gemini API Key", type="password")
+API_KEY = st.sidebar.text_input("Gemini API Key", type="password", value=env_api_key)
 
 if API_KEY:
     genai.configure(api_key=API_KEY)
@@ -59,11 +63,33 @@ if API_KEY:
         # Fallback to a safe default if the provided one fails
         model = genai.GenerativeModel("gemini-2.0-flash")
 else:
+    st.sidebar.warning("Please enter your Google Gemini API Key above.")
     st.error("Please provide a Gemini API Key to use the AI features.")
 
 # --- Helper Functions ---
-def parse_receipt_with_ai(image_bytes):
-    """Sends image to Gemini and returns structured JSON."""
+def sanitize_filename(name):
+    """Sanitizes strings for safe filesystem usage."""
+    return re.sub(r'[^a-zA-Z0-9_\-]', '_', name)
+
+def save_receipt_file(file_bytes, date, payee, amount, original_name):
+    """Saves file to disk and returns the relative path."""
+    ext = os.path.splitext(original_name)[1] or (".pdf" if "pdf" in original_name.lower() else ".jpg")
+    clean_payee = sanitize_filename(payee)
+    timestamp = datetime.now().strftime("%H%M%S")
+    
+    # Round to nearest integer (e.g., 15.50 -> 16, 15.40 -> 15)
+    amount_str = str(int(round(amount)))
+    
+    # Naming convention: YYYY-MM-DD_Payee_RoundedAmount_HHMMSS.ext
+    filename = f"{date}_{clean_payee}_{amount_str}_{timestamp}{ext}"
+    file_path = os.path.join(RECEIPTS_DIR, filename)
+    
+    with open(file_path, "wb") as f:
+        f.write(file_bytes)
+    return file_path
+
+def parse_receipt_with_ai(file_bytes, mime_type):
+    """Sends file to Gemini and returns structured JSON."""
     if not API_KEY:
         st.error("Please provide a Gemini API Key in the sidebar.")
         return None
@@ -94,8 +120,36 @@ def parse_receipt_with_ai(image_bytes):
     """
     
     try:
-        img = Image.open(io.BytesIO(image_bytes))
-        response = model.generate_content([prompt, img])
+        # Check if the file is a PDF (by mime type or extension)
+        is_pdf = (mime_type == 'application/pdf') or \
+                 (mime_type == 'application/octet-stream' and 'pdf' in str(mime_type).lower()) or \
+                 (isinstance(mime_type, str) and 'pdf' in mime_type.lower())
+        
+        # Fallback check if mime_type is None or ambiguous but original_name (if available) ends in .pdf
+        # Since we don't pass original_name to parse_receipt_with_ai currently, 
+        # let's just make the mime_type check as broad as possible or use a try-except for PIL.
+        
+        if is_pdf:
+            # For PDFs, it's safer to use the File API for processing
+            # We'll save to a temporary file for uploading
+            temp_path = f"data/temp_{datetime.now().strftime('%H%M%S')}.pdf"
+            with open(temp_path, "wb") as f:
+                f.write(file_bytes)
+            
+            try:
+                # Upload to Gemini File API
+                uploaded_file = genai.upload_file(path=temp_path, display_name="Receipt PDF")
+                response = model.generate_content([prompt, uploaded_file])
+                
+                # Cleanup: You might want to delete the uploaded_file via File API if needed, 
+                # but it expires automatically in 48h.
+            finally:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+        else:
+            # Standard image processing
+            img = Image.open(io.BytesIO(file_bytes))
+            response = model.generate_content([prompt, img])
         
         text = response.text
         start_idx = text.find('{')
@@ -121,42 +175,67 @@ def entry_page():
     st.title("📸 Receipt Entry")
     st.markdown("Digitize your receipts and save them to SQLite.")
 
-    # Initialize session state for form values
+    # Initialize session state
     if "form_data" not in st.session_state:
         st.session_state.form_data = {
             "date": datetime.now().strftime("%Y-%m-%d"),
             "payee": "",
             "amount": 0.0,
             "category": "Misc",
-            "account": "Checking"
+            "account": "Checking",
+            "file_content": None,
+            "original_name": ""
         }
+    
+    if "pending_items" not in st.session_state:
+        st.session_state.pending_items = []
 
     # 1. Input Section
     tab1, tab2 = st.tabs(["📸 Camera", "📂 Upload"])
 
-    captured_image = None
+    files_to_process = []
     with tab1:
         camera_img = st.camera_input("Take a picture of your receipt")
         if camera_img:
-            captured_image = camera_img.getvalue()
+            files_to_process.append({"name": "Camera Capture.jpg", "content": camera_img.getvalue(), "mime_type": "image/jpeg"})
 
     with tab2:
-        uploaded_file = st.file_uploader("Choose a receipt image...", type=["jpg", "jpeg", "png"])
-        if uploaded_file:
-            captured_image = uploaded_file.getvalue()
+        uploaded_files = st.file_uploader("Choose receipt files (Images or PDF)...", type=["jpg", "jpeg", "png", "pdf"], accept_multiple_files=True)
+        if uploaded_files:
+            for f in uploaded_files:
+                files_to_process.append({"name": f.name, "content": f.getvalue(), "mime_type": f.type})
 
     # 2. AI Processing
-    if captured_image:
-        if st.button("✨ Parse with AI"):
-            with st.spinner("Analyzing receipt..."):
-                result = parse_receipt_with_ai(captured_image)
-                if result:
-                    st.session_state.form_data.update(result)
-                    st.success("AI extraction complete!")
+    if files_to_process:
+        if st.button(f"✨ Parse {len(files_to_process)} Receipt(s) with AI"):
+            with st.spinner(f"Analyzing {len(files_to_process)} receipt(s)..."):
+                new_items = []
+                for file_data in files_to_process:
+                    result = parse_receipt_with_ai(file_data["content"], file_data["mime_type"])
+                    if result:
+                        # Include file content for saving later
+                        result["file_content"] = file_data["content"]
+                        result["original_name"] = file_data["name"]
+                        new_items.append(result)
+                
+                if new_items:
+                    st.session_state.pending_items.extend(new_items)
+                    # Load the first item from the newly added items if form is currently default
+                    st.session_state.form_data.update(st.session_state.pending_items.pop(0))
+                    st.success(f"Added {len(new_items)} items to queue. Reviewing the first one.")
+                else:
+                    st.error("AI could not extract data from the provided image(s).")
 
     # 3. Verification Form
     st.divider()
     st.subheader("Verify & Edit Details")
+
+    # Queue status indicator
+    if st.session_state.pending_items:
+        st.info(f"📂 **{len(st.session_state.pending_items)}** more item(s) waiting in your processing queue.")
+        if st.button("🗑️ Clear Queue"):
+            st.session_state.pending_items = []
+            st.rerun()
 
     with st.form("entry_form", clear_on_submit=False):
         col1, col2 = st.columns(2)
@@ -173,16 +252,33 @@ def entry_page():
         submit_button = st.form_submit_button("💾 Save Transaction")
 
         if submit_button:
-            if save_transaction(date_val, payee_val, amount_val, category_val, account_val):
+            # Save file first if we have content
+            file_path = None
+            if st.session_state.form_data.get("file_content"):
+                file_path = save_receipt_file(
+                    st.session_state.form_data["file_content"],
+                    date_val,
+                    payee_val,
+                    amount_val,
+                    st.session_state.form_data.get("original_name", "receipt.jpg")
+                )
+
+            if save_transaction(date_val, payee_val, amount_val, category_val, account_val, file_path):
                 st.success(f"Successfully saved to database!")
-                # Reset form for next entry
-                st.session_state.form_data = {
-                    "date": datetime.now().strftime("%Y-%m-%d"),
-                    "payee": "",
-                    "amount": 0.0,
-                    "category": "Misc",
-                    "account": "Checking"
-                }
+                # Load next item from queue if available
+                if st.session_state.pending_items:
+                    st.session_state.form_data.update(st.session_state.pending_items.pop(0))
+                else:
+                    # Reset to defaults
+                    st.session_state.form_data = {
+                        "date": datetime.now().strftime("%Y-%m-%d"),
+                        "payee": "",
+                        "amount": 0.0,
+                        "category": "Misc",
+                        "account": "Checking",
+                        "file_content": None,
+                        "original_name": ""
+                    }
                 st.rerun()
 
     # Show recent entries in the sidebar
@@ -239,9 +335,47 @@ def report_page():
     else:
         st.warning(f"No transactions found for {selected_month_str}.")
 
+def sql_admin_page():
+    st.title("🗄️ SQL Admin Console")
+    st.markdown("Execute raw SQL commands against the database. Use with caution!")
+
+    # Pre-filled query for convenience
+    default_query = "SELECT * FROM transactions LIMIT 50"
+    
+    query = st.text_area("SQL Query", value=default_query, height=150)
+    
+    col1, col2 = st.columns([1, 4])
+    with col1:
+        run_button = st.button("🚀 Run Query", use_container_width=True)
+    
+    if run_button and query:
+        with st.spinner("Executing query..."):
+            result, error = run_query(query)
+            
+            if error:
+                st.error(f"SQL Error: {error}")
+            elif isinstance(result, pd.DataFrame):
+                if result.empty:
+                    st.info("Query returned no results.")
+                else:
+                    st.success(f"Query returned {len(result)} rows.")
+                    st.dataframe(result, use_container_width=True, hide_index=True)
+                    
+                    # Download CSV
+                    csv = result.to_csv(index=False).encode('utf-8')
+                    st.download_button(
+                        label="📥 Download Results (CSV)",
+                        data=csv,
+                        file_name=f"query_result_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                        mime="text/csv",
+                    )
+            else:
+                st.success(result)
+
 # --- Sidebar Navigation ---
 pg = st.navigation([
     st.Page(entry_page, title="Add Receipt", icon="📸"),
     st.Page(report_page, title="Reports", icon="📊"),
+    st.Page(sql_admin_page, title="Admin (SQL)", icon="🗄️"),
 ])
 pg.run()

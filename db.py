@@ -23,20 +23,28 @@ def init_db():
             amount REAL NOT NULL,
             category TEXT NOT NULL,
             account TEXT NOT NULL,
+            file_path TEXT,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    
+    # Check if file_path column exists (migration for existing DBs)
+    cursor.execute("PRAGMA table_info(transactions)")
+    columns = [column[1] for column in cursor.fetchall()]
+    if "file_path" not in columns:
+        cursor.execute("ALTER TABLE transactions ADD COLUMN file_path TEXT")
+        
     conn.commit()
     conn.close()
 
-def save_transaction(date, payee, amount, category, account):
+def save_transaction(date, payee, amount, category, account, file_path=None):
     """Saves a single transaction to the database."""
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute("""
-        INSERT INTO transactions (date, payee, amount, category, account)
-        VALUES (?, ?, ?, ?, ?)
-    """, (date, payee, amount, category, account))
+        INSERT INTO transactions (date, payee, amount, category, account, file_path)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (date, payee, amount, category, account, file_path))
     conn.commit()
     conn.close()
     return True
@@ -84,3 +92,21 @@ def get_unique_accounts():
     accounts = [row[0] for row in cursor.fetchall() if row[0]]
     conn.close()
     return accounts
+
+def run_query(query):
+    """Executes an arbitrary SQL query and returns a DataFrame or success message."""
+    conn = sqlite3.connect(DB_FILE)
+    try:
+        # Check if it's a SELECT query
+        if query.strip().upper().startswith("SELECT") or query.strip().upper().startswith("PRAGMA"):
+            df = pd.read_sql_query(query, conn)
+            return df, None
+        else:
+            cursor = conn.cursor()
+            cursor.execute(query)
+            conn.commit()
+            return f"Query executed successfully. Rows affected: {cursor.rowcount}", None
+    except Exception as e:
+        return None, str(e)
+    finally:
+        conn.close()
