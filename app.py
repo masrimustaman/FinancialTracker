@@ -6,7 +6,7 @@ from datetime import datetime
 from PIL import Image
 import io
 import pandas as pd
-from db import init_db, save_transaction, get_recent_transactions, get_monthly_report, get_available_months, get_unique_categories, get_unique_accounts, run_query
+from db import init_db, save_transaction, get_recent_transactions, get_monthly_report, get_available_months, get_unique_categories, get_unique_accounts, run_query, delete_transaction, update_transaction
 import streamlit.components.v1 as components
 import re
 
@@ -110,12 +110,13 @@ def parse_receipt_with_ai(file_bytes, mime_type):
     Act as an OCR and accounting assistant. Analyze this receipt and extract:
     - Date (formatted exactly as YYYY-MM-DD)
     - Payee name
+    - Item name (a short descriptive name for the main item(s) purchased, e.g., "Grocery", "Dinner", "Office Supplies")
     - Total Amount (as a float)
     - A suitable expense category. {category_context}
     - The payment account or method used. {account_context}. 
       If a specific card brand or last 4 digits are mentioned, suggest 'Credit Card' or 'Debit Card' accordingly.
 
-    Return the data STRICTLY as a JSON object with keys: "date", "payee", "amount", "category", "account".
+    Return the data STRICTLY as a JSON object with keys: "date", "payee", "item_name", "amount", "category", "account".
     Do not include any other text or markdown formatting.
     """
     
@@ -171,6 +172,94 @@ def parse_receipt_with_ai(file_bytes, mime_type):
         return None
 
 # --- Main App Logic ---
+def editor_page():
+    st.title("✏️ Database Editor")
+    st.markdown("Directly edit or delete transactions from the database.")
+
+    # We'll use a session state key for the editor to ensure we can reset or reload it
+    if "db_data" not in st.session_state:
+        st.session_state.db_data, _ = run_query("SELECT * FROM transactions ORDER BY date DESC, created_at DESC LIMIT 100")
+
+    st.info("Showing the most recent 100 transactions.")
+
+    # Filter out column that might cause issues or we don't want to edit directly if needed
+    # But for SQLite, we want the ID for updates.
+    
+    edited_df = st.data_editor(
+        st.session_state.db_data,
+        key="transaction_editor",
+        num_rows="dynamic",
+        use_container_width=True,
+        hide_index=True,
+        column_order=["id", "date", "payee", "item_name", "amount", "category", "account", "created_at", "file_path"],
+        column_config={
+            "id": st.column_config.NumberColumn("ID", disabled=True),
+            "date": st.column_config.TextColumn("Date (YYYY-MM-DD)", required=True),
+            "payee": st.column_config.TextColumn("Payee"),
+            "item_name": st.column_config.TextColumn("Item Name"),
+            "amount": st.column_config.NumberColumn("Amount", format="$%.2f", min_value=0.0),
+            "created_at": st.column_config.DatetimeColumn("Added At", disabled=True),
+            "file_path": st.column_config.TextColumn("File Path", disabled=True),
+        }
+    )
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("💾 Save Changes", type="primary"):
+            # Identify changes in data_editor state
+            state = st.session_state.transaction_editor
+            
+            changes_made = False
+            
+            # 1. Handle Edited Rows
+            for index_str, updates in state.get("edited_rows", {}).items():
+                index = int(index_str)
+                original_row = st.session_state.db_data.iloc[index]
+                tid = int(original_row["id"])
+                
+                # Combine updates with original values
+                new_date = str(updates.get("date", original_row["date"]))
+                new_payee = updates.get("payee", original_row["payee"])
+                new_item_name = updates.get("item_name", original_row["item_name"])
+                new_amount = float(updates.get("amount", original_row["amount"]))
+                new_category = updates.get("category", original_row["category"])
+                new_account = updates.get("account", original_row["account"])
+                
+                update_transaction(tid, new_date, new_payee, new_amount, new_category, new_account, item_name=new_item_name)
+                changes_made = True
+
+            # 2. Handle Deleted Rows
+            for index in state.get("deleted_rows", []):
+                tid = int(st.session_state.db_data.iloc[index]["id"])
+                delete_transaction(tid)
+                changes_made = True
+
+            # 3. Handle Added Rows
+            for row in state.get("added_rows", []):
+                # Ensure all required fields are present with defaults if missing
+                save_transaction(
+                    date=str(row.get("date", datetime.now().strftime("%Y-%m-%d"))),
+                    payee=row.get("payee", "New Item"),
+                    item_name=row.get("item_name", ""),
+                    amount=float(row.get("amount", 0.0)),
+                    category=row.get("category", "Misc"),
+                    account=row.get("account", "Cash")
+                )
+                changes_made = True
+
+            if changes_made:
+                st.success("Changes saved to database!")
+                # Refresh data
+                st.session_state.db_data, _ = run_query("SELECT * FROM transactions ORDER BY date DESC, created_at DESC LIMIT 100")
+                st.rerun()
+            else:
+                st.info("No changes to save.")
+
+    with col2:
+        if st.button("🔄 Refresh Data"):
+            st.session_state.db_data, _ = run_query("SELECT * FROM transactions ORDER BY date DESC, created_at DESC LIMIT 100")
+            st.rerun()
+
 def entry_page():
     st.title("📸 Receipt Entry")
     st.markdown("Digitize your receipts and save them to SQLite.")
@@ -180,6 +269,7 @@ def entry_page():
         st.session_state.form_data = {
             "date": datetime.now().strftime("%Y-%m-%d"),
             "payee": "",
+            "item_name": "",
             "amount": 0.0,
             "category": "Misc",
             "account": "Checking",
@@ -243,6 +333,7 @@ def entry_page():
         with col1:
             date_val = st.text_input("Date (YYYY-MM-DD)", value=st.session_state.form_data["date"])
             payee_val = st.text_input("Payee", value=st.session_state.form_data["payee"])
+            item_name_val = st.text_input("Item Name", value=st.session_state.form_data.get("item_name", ""))
             amount_val = st.number_input("Total Amount", value=float(st.session_state.form_data["amount"]), step=0.01, format="%.2f")
 
         with col2:
@@ -263,7 +354,7 @@ def entry_page():
                     st.session_state.form_data.get("original_name", "receipt.jpg")
                 )
 
-            if save_transaction(date_val, payee_val, amount_val, category_val, account_val, file_path):
+            if save_transaction(date_val, payee_val, amount_val, category_val, account_val, file_path, item_name=item_name_val):
                 st.success(f"Successfully saved to database!")
                 # Load next item from queue if available
                 if st.session_state.pending_items:
@@ -273,6 +364,7 @@ def entry_page():
                     st.session_state.form_data = {
                         "date": datetime.now().strftime("%Y-%m-%d"),
                         "payee": "",
+                        "item_name": "",
                         "amount": 0.0,
                         "category": "Misc",
                         "account": "Checking",
@@ -286,7 +378,11 @@ def entry_page():
         st.subheader("Recent Entries")
         recent_df = get_recent_transactions(5)
         if not recent_df.empty:
-            st.dataframe(recent_df[["date", "payee", "amount"]], hide_index=True)
+            # Ensure correct column order in sidebar
+            cols_to_show = ["date", "payee", "item_name", "amount"]
+            # Only include columns that actually exist in the dataframe
+            available_cols = [c for c in cols_to_show if c in recent_df.columns]
+            st.dataframe(recent_df[available_cols], hide_index=True)
         else:
             st.info("No recent entries found.")
 
@@ -315,8 +411,10 @@ def report_page():
         col1.metric("Total Transactions", count)
         col2.metric("Total Monthly Spent", f"${total_spent:,.2f}")
 
-        # Display dataframe
-        st.dataframe(report_df.drop(columns=["id", "created_at"]), use_container_width=True, hide_index=True)
+        # Display dataframe with specific column order
+        report_cols = ["date", "payee", "item_name", "amount", "category", "account", "file_path"]
+        available_report_cols = [c for c in report_cols if c in report_df.columns]
+        st.dataframe(report_df[available_report_cols], use_container_width=True, hide_index=True)
 
         # Download CSV
         csv = report_df.to_csv(index=False).encode('utf-8')
@@ -359,10 +457,19 @@ def sql_admin_page():
                     st.info("Query returned no results.")
                 else:
                     st.success(f"Query returned {len(result)} rows.")
-                    st.dataframe(result, use_container_width=True, hide_index=True)
+                    
+                    # Reorder columns if they match the expected set
+                    admin_cols_order = ["id", "date", "payee", "item_name", "amount", "category", "account", "created_at", "file_path"]
+                    # Find which columns from our desired order are actually in the result
+                    existing_cols = [c for c in admin_cols_order if c in result.columns]
+                    # Append any other columns that were in the result but not in our list
+                    remaining_cols = [c for c in result.columns if c not in admin_cols_order]
+                    final_cols = existing_cols + remaining_cols
+                    
+                    st.dataframe(result[final_cols], use_container_width=True, hide_index=True)
                     
                     # Download CSV
-                    csv = result.to_csv(index=False).encode('utf-8')
+                    csv = result[final_cols].to_csv(index=False).encode('utf-8')
                     st.download_button(
                         label="📥 Download Results (CSV)",
                         data=csv,
@@ -376,6 +483,7 @@ def sql_admin_page():
 pg = st.navigation([
     st.Page(entry_page, title="Add Receipt", icon="📸"),
     st.Page(report_page, title="Reports", icon="📊"),
+    st.Page(editor_page, title="Editor", icon="✏️"),
     st.Page(sql_admin_page, title="Admin (SQL)", icon="🗄️"),
 ])
 pg.run()

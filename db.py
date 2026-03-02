@@ -20,6 +20,7 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             date TEXT NOT NULL,
             payee TEXT NOT NULL,
+            item_name TEXT,
             amount REAL NOT NULL,
             category TEXT NOT NULL,
             account TEXT NOT NULL,
@@ -33,18 +34,20 @@ def init_db():
     columns = [column[1] for column in cursor.fetchall()]
     if "file_path" not in columns:
         cursor.execute("ALTER TABLE transactions ADD COLUMN file_path TEXT")
+    if "item_name" not in columns:
+        cursor.execute("ALTER TABLE transactions ADD COLUMN item_name TEXT")
         
     conn.commit()
     conn.close()
 
-def save_transaction(date, payee, amount, category, account, file_path=None):
+def save_transaction(date, payee, amount, category, account, file_path=None, item_name=None):
     """Saves a single transaction to the database."""
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute("""
-        INSERT INTO transactions (date, payee, amount, category, account, file_path)
-        VALUES (?, ?, ?, ?, ?, ?)
-    """, (date, payee, amount, category, account, file_path))
+        INSERT INTO transactions (date, payee, item_name, amount, category, account, file_path)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, (date, payee, item_name, amount, category, account, file_path))
     conn.commit()
     conn.close()
     return True
@@ -92,6 +95,28 @@ def get_unique_accounts():
     accounts = [row[0] for row in cursor.fetchall() if row[0]]
     conn.close()
     return accounts
+
+def delete_transaction(transaction_id):
+    """Deletes a transaction from the database."""
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM transactions WHERE id = ?", (transaction_id,))
+    conn.commit()
+    conn.close()
+    return True
+
+def update_transaction(transaction_id, date, payee, amount, category, account, item_name=None):
+    """Updates an existing transaction."""
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("""
+        UPDATE transactions 
+        SET date = ?, payee = ?, item_name = ?, amount = ?, category = ?, account = ?
+        WHERE id = ?
+    """, (date, payee, item_name, amount, category, account, transaction_id))
+    conn.commit()
+    conn.close()
+    return True
 
 def run_query(query):
     """Executes an arbitrary SQL query and returns a DataFrame or success message."""
