@@ -24,7 +24,6 @@ def init_db():
             invoice_number TEXT,
             amount REAL NOT NULL,
             category TEXT NOT NULL,
-            account TEXT NOT NULL,
             file_path TEXT,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
@@ -43,14 +42,14 @@ def init_db():
     conn.commit()
     conn.close()
 
-def save_transaction(date, payee, amount, category, account, file_path=None, item_name=None, invoice_number=None):
+def save_transaction(date, payee, amount, category, file_path=None, item_name=None, invoice_number=None):
     """Saves a single transaction to the database."""
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute("""
-        INSERT INTO transactions (date, payee, item_name, invoice_number, amount, category, account, file_path)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    """, (date, payee, item_name, invoice_number, amount, category, account, file_path))
+        INSERT INTO transactions (date, payee, item_name, invoice_number, amount, category, file_path)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, (date, payee, item_name, invoice_number, amount, category, file_path))
     conn.commit()
     conn.close()
     return True
@@ -90,15 +89,6 @@ def get_unique_categories():
     conn.close()
     return categories
 
-def get_unique_accounts():
-    """Returns a list of unique accounts used in the database."""
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute("SELECT DISTINCT account FROM transactions ORDER BY account ASC")
-    accounts = [row[0] for row in cursor.fetchall() if row[0]]
-    conn.close()
-    return accounts
-
 def delete_transaction(transaction_id):
     """Deletes a transaction from the database."""
     conn = sqlite3.connect(DB_FILE)
@@ -108,15 +98,15 @@ def delete_transaction(transaction_id):
     conn.close()
     return True
 
-def update_transaction(transaction_id, date, payee, amount, category, account, item_name=None, invoice_number=None):
+def update_transaction(transaction_id, date, payee, amount, category, item_name=None, invoice_number=None):
     """Updates an existing transaction."""
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute("""
         UPDATE transactions 
-        SET date = ?, payee = ?, item_name = ?, invoice_number = ?, amount = ?, category = ?, account = ?
+        SET date = ?, payee = ?, item_name = ?, invoice_number = ?, amount = ?, category = ?
         WHERE id = ?
-    """, (date, payee, item_name, invoice_number, amount, category, account, transaction_id))
+    """, (date, payee, item_name, invoice_number, amount, category, transaction_id))
     conn.commit()
     conn.close()
     return True
